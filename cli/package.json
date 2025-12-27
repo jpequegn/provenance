@@ -1,0 +1,25 @@
+{
+  "name": "provo",
+  "version": "0.1.0",
+  "description": "CLI for Provenance - capture the why behind decisions",
+  "type": "module",
+  "bin": {
+    "provo": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "provo": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "chalk": "^5.3.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  }
+}
