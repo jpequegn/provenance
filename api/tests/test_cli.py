@@ -514,3 +514,44 @@ class TestSearchCommand:
         assert result.exit_code == 0
         call_args = mock_instance.get.call_args
         assert call_args[0][0] == "http://custom:9000/api/search"
+
+
+class TestWatchCommand:
+    """Tests for the watch command."""
+
+    def test_watch_help_shows_usage(self):
+        """Test that watch --help shows usage information."""
+        result = runner.invoke(app, ["watch", "--help"])
+        assert result.exit_code == 0
+        assert "Watch a directory" in result.stdout
+        assert "--type" in result.stdout
+        assert "--project" in result.stdout
+        assert "--process-existing" in result.stdout
+
+    def test_watch_missing_path_shows_error(self):
+        """Test that missing path argument shows error."""
+        result = runner.invoke(app, ["watch"])
+        assert result.exit_code != 0
+        assert "Missing argument" in result.stdout or "PATH" in result.stdout
+
+    def test_watch_invalid_source_type(self):
+        """Test that invalid source type shows error."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = runner.invoke(app, ["watch", tmpdir, "--type", "invalid"])
+            assert result.exit_code == 1
+            assert "Invalid source type" in result.stdout
+
+    def test_watch_nonexistent_path(self):
+        """Test that nonexistent path shows error."""
+        result = runner.invoke(app, ["watch", "/nonexistent/path/12345"])
+        assert result.exit_code == 1
+        assert "does not exist" in result.stdout
+
+    def test_watch_file_instead_of_directory(self):
+        """Test that file path instead of directory shows error."""
+        import tempfile
+        with tempfile.NamedTemporaryFile() as f:
+            result = runner.invoke(app, ["watch", f.name])
+            assert result.exit_code == 1
+            assert "not a directory" in result.stdout

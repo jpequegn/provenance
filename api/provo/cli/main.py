@@ -1,15 +1,27 @@
 """Provenance CLI - capture the why behind your decisions."""
 
+import logging
 import os
+import signal
 import sys
 from datetime import datetime
-from typing import Annotated, Any
+from pathlib import Path
+from typing import Annotated, Any, Literal
 
 import httpx
 import typer
 
+from provo.capture import ParsedTranscript, TranscriptWatcher
+
 # Default API base URL
 DEFAULT_API_URL = "http://localhost:8000"
+
+# Configure logging for watch command
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 # Icons for source types
 SOURCE_ICONS: dict[str, str] = {
@@ -276,6 +288,207 @@ def search(
             err=True,
         )
         sys.exit(1)
+
+
+def send_to_api(
+    transcript: ParsedTranscript,
+    source_type: Literal["zoom", "teams", "notes"],
+    api_url: str,
+    project: str | None = None,
+) -> str | None:
+    """Send a parsed transcript to the API.
+
+    Returns the fragment ID on success, None on failure.
+    """
+    payload: dict[str, Any] = {
+        "content": transcript.content,
+        "source_type": source_type,
+        "participants": transcript.participants,
+    }
+
+    if project:
+        payload["project"] = project
+    if transcript.source_file:
+        payload["source_ref"] = transcript.source_file
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(
+                f"{api_url}/api/fragments",
+                json=payload,
+            )
+
+            if response.status_code == 201:
+                data = response.json()
+                return str(data.get("id", "unknown"))
+            else:
+                logging.error(f"API error: {response.status_code} - {response.text}")
+                return None
+
+    except Exception as e:
+        logging.error(f"Failed to send to API: {e}")
+        return None
+
+
+@app.command()
+def watch(
+    path: Annotated[
+        Path,
+        typer.Argument(help="Directory to watch for transcript files"),
+    ],
+    source_type: Annotated[
+        str,
+        typer.Option(
+            "--type",
+            "-t",
+            help="Type of transcripts (zoom, teams, notes)",
+        ),
+    ] = "zoom",
+    project: Annotated[
+        str | None,
+        typer.Option("-p", "--project", help="Project name for all captured fragments"),
+    ] = None,
+    process_existing: Annotated[
+        bool,
+        typer.Option(
+            "--process-existing",
+            help="Process existing unprocessed files on startup",
+        ),
+    ] = True,
+) -> None:
+    """Watch a directory for new transcript files.
+
+    Automatically processes new VTT and TXT files and sends them to the API.
+
+    Examples:
+        provo watch ~/Zoom --type zoom
+        provo watch ~/Meetings -t teams -p billing
+        provo watch ./transcripts --process-existing
+    """
+    # Validate source type
+    valid_types = {"zoom", "teams", "notes"}
+    if source_type not in valid_types:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Invalid source type: {source_type}. Must be one of: {', '.join(valid_types)}",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Validate path
+    if not path.exists():
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Path does not exist: {path}",
+            err=True,
+        )
+        sys.exit(1)
+
+    if not path.is_dir():
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Path is not a directory: {path}",
+            err=True,
+        )
+        sys.exit(1)
+
+    api_url = get_api_url()
+
+    # Track statistics
+    stats = {"processed": 0, "failed": 0}
+
+    def on_transcript(
+        transcript: ParsedTranscript,
+        src_type: Literal["zoom", "teams", "notes"],
+    ) -> None:
+        """Handle a new transcript."""
+        file_name = Path(transcript.source_file or "unknown").name
+        typer.echo(
+            typer.style("📄 ", bold=True)
+            + f"Processing: {file_name}"
+        )
+
+        fragment_id = send_to_api(transcript, src_type, api_url, project)
+
+        if fragment_id:
+            stats["processed"] += 1
+            typer.echo(
+                typer.style("✓ ", fg=typer.colors.GREEN, bold=True)
+                + f"Captured! Fragment ID: {fragment_id}"
+            )
+        else:
+            stats["failed"] += 1
+            typer.echo(
+                typer.style("✗ ", fg=typer.colors.RED, bold=True)
+                + "Failed to capture. Check API connection.",
+                err=True,
+            )
+
+    # Create watcher
+    source_type_literal: Literal["zoom", "teams", "notes"] = source_type  # type: ignore[assignment]
+    watcher = TranscriptWatcher(
+        watch_path=path,
+        source_type=source_type_literal,
+        callback=on_transcript,
+    )
+
+    # Handle Ctrl+C gracefully
+    stop_requested = False
+
+    def signal_handler(signum: int, frame: object) -> None:
+        nonlocal stop_requested
+        if stop_requested:
+            # Force exit on second Ctrl+C
+            sys.exit(1)
+        stop_requested = True
+        typer.echo("\n" + typer.style("Stopping watcher...", fg=typer.colors.YELLOW))
+        watcher.stop()
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Start watching
+    typer.echo(
+        typer.style("👁️  ", bold=True)
+        + f"Watching {path} for {source_type} transcripts"
+    )
+    if project:
+        typer.echo(f"   Project: {project}")
+    typer.echo(f"   API: {api_url}")
+    typer.echo("   Press Ctrl+C to stop\n")
+
+    try:
+        watcher.start()
+
+        # Process existing files if requested
+        if process_existing:
+            existing_count = watcher.process_existing()
+            if existing_count > 0:
+                typer.echo(
+                    typer.style("ℹ️  ", bold=True)
+                    + f"Processed {existing_count} existing file(s)\n"
+                )
+
+        # Keep running until stopped
+        while watcher.is_running() and not stop_requested:
+            signal.pause()
+
+    except Exception as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Watcher error: {e}",
+            err=True,
+        )
+        sys.exit(1)
+
+    finally:
+        watcher.stop()
+
+    # Print summary
+    typer.echo(
+        f"\n{typer.style('Summary:', bold=True)} "
+        f"Processed {stats['processed']}, Failed {stats['failed']}"
+    )
 
 
 if __name__ == "__main__":
