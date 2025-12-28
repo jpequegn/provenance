@@ -1,12 +1,29 @@
 """FastAPI application entry point."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+from provo.api.routes import fragments
+from provo.storage import init_database
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Initialize services on startup."""
+    # Initialize database
+    await init_database()
+    yield
+    # Cleanup (if needed) would go here
+
 
 app = FastAPI(
     title="Provenance API",
     description="Capture the why behind your decisions",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # Allow CORS for local development
@@ -31,8 +48,10 @@ async def health() -> dict[str, str]:
     return {"status": "healthy"}
 
 
-# TODO: Add routers
-# from provo.api.routes import fragments, search, decisions
-# app.include_router(fragments.router, prefix="/api/fragments", tags=["fragments"])
+# Include routers
+app.include_router(fragments.router, prefix="/api/fragments", tags=["fragments"])
+
+# TODO: Add remaining routers
+# from provo.api.routes import search, decisions
 # app.include_router(search.router, prefix="/api/search", tags=["search"])
 # app.include_router(decisions.router, prefix="/api/decisions", tags=["decisions"])
