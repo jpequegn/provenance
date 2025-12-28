@@ -54,3 +54,29 @@ class ErrorResponse(BaseModel):
 
     detail: str
     code: str | None = None
+
+
+class SearchResultItem(BaseModel):
+    """A single search result with similarity score."""
+
+    id: UUID
+    content: str = Field(..., validation_alias="raw_content")
+    summary: str | None = None
+    score: float = Field(..., description="Similarity score (0-1, higher is more similar)")
+    source_type: SourceType
+    source_ref: str | None = None
+    captured_at: datetime
+    topics: list[str] = Field(default_factory=list)
+    project: str | None = None
+
+    model_config = {
+        "from_attributes": True,
+        "populate_by_name": True,
+    }
+
+
+class SearchResponse(BaseModel):
+    """Response schema for semantic search."""
+
+    query: str
+    results: list[SearchResultItem] = Field(default_factory=list)
