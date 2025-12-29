@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from provo.api.routes import fragments, search
+from provo.api.routes import assumptions, fragments, search
 from provo.storage import init_database
 
 
@@ -51,7 +51,4 @@ async def health() -> dict[str, str]:
 # Include routers
 app.include_router(fragments.router, prefix="/api/fragments", tags=["fragments"])
 app.include_router(search.router, prefix="/api/search", tags=["search"])
-
-# TODO: Add remaining routers
-# from provo.api.routes import decisions
-# app.include_router(decisions.router, prefix="/api/decisions", tags=["decisions"])
+app.include_router(assumptions.router, prefix="/api/assumptions", tags=["assumptions"])
