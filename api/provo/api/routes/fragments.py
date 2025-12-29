@@ -1,12 +1,52 @@
 """Fragment capture API endpoints."""
 
-from fastapi import APIRouter, HTTPException, status
+import logging
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 
 from provo.api.schemas import FragmentCreateRequest, FragmentResponse
-from provo.processing import get_embedding_service
+from provo.processing import get_decision_extractor, get_embedding_service
 from provo.storage import ContextFragment, SourceType, get_database, get_vector_store
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+async def extract_decisions_background(fragment_id: str, content: str) -> None:
+    """Background task to extract decisions from fragment content.
+
+    This runs asynchronously after the fragment is created and stored.
+    Failures are logged but don't affect the main request.
+    """
+    from uuid import UUID
+
+    try:
+        db = get_database()
+        extractor = get_decision_extractor()
+
+        # Extract decisions using LLM
+        result = await extractor.extract_decisions(
+            content=content,
+            fragment_id=UUID(fragment_id),
+            min_confidence=0.5,
+        )
+
+        # Store each decision in the database
+        for decision in result.decisions:
+            await db.create_decision(decision)
+            logger.info(
+                f"Stored decision for fragment {fragment_id}: {decision.what[:50]}..."
+            )
+
+        logger.info(
+            f"Decision extraction complete for {fragment_id}: "
+            f"{len(result.decisions)} decisions stored"
+        )
+
+    except Exception as e:
+        # Log but don't raise - this is a background task
+        logger.error(f"Failed to extract decisions for fragment {fragment_id}: {e}")
 
 
 @router.post(
@@ -19,7 +59,10 @@ router = APIRouter()
         503: {"description": "Service unavailable (database or embedding service error)"},
     },
 )
-async def create_fragment(request: FragmentCreateRequest) -> FragmentResponse:
+async def create_fragment(
+    request: FragmentCreateRequest,
+    background_tasks: BackgroundTasks,
+) -> FragmentResponse:
     """Create a new context fragment.
 
     This endpoint:
@@ -27,8 +70,10 @@ async def create_fragment(request: FragmentCreateRequest) -> FragmentResponse:
     2. Creates the fragment in SQLite
     3. Generates an embedding for the content
     4. Stores the embedding in ChromaDB for semantic search
+    5. Triggers async decision extraction (background)
 
     The fragment is immediately searchable after creation.
+    Decision extraction runs in the background and doesn't block the response.
     """
     # Get services
     db = get_database()
@@ -71,6 +116,13 @@ async def create_fragment(request: FragmentCreateRequest) -> FragmentResponse:
             fragment_id=created_fragment.id,
             vector=embedding_result.vector,
             metadata=metadata if metadata else None,
+        )
+
+        # Schedule decision extraction as background task
+        background_tasks.add_task(
+            extract_decisions_background,
+            str(created_fragment.id),
+            request.content,
         )
 
         return FragmentResponse.model_validate(created_fragment)
