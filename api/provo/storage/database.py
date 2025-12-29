@@ -425,10 +425,13 @@ class Database:
         self,
         fragment_id: UUID,
         link_type: LinkType | None = None,
-    ) -> list[tuple[ContextFragment, float]]:
-        """Get fragments related to a given fragment."""
+    ) -> list[tuple[ContextFragment, float, LinkType]]:
+        """Get fragments related to a given fragment.
+
+        Returns a list of tuples: (fragment, strength, link_type)
+        """
         query = """
-            SELECT f.*, fl.strength FROM fragments f
+            SELECT f.*, fl.strength, fl.link_type FROM fragments f
             JOIN fragment_links fl ON (fl.target_id = f.id OR fl.source_id = f.id)
             WHERE (fl.source_id = ? OR fl.target_id = ?) AND f.id != ?
         """
@@ -443,7 +446,14 @@ class Database:
         async with self.connect() as db:
             cursor = await db.execute(query, params)
             rows = await cursor.fetchall()
-            return [(self._row_to_fragment(row), row["strength"]) for row in rows]
+            return [
+                (
+                    self._row_to_fragment(row),
+                    row["strength"],
+                    LinkType(row["link_type"]),
+                )
+                for row in rows
+            ]
 
     # ============== Helpers ==============
 

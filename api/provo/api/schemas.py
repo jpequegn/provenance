@@ -80,3 +80,32 @@ class SearchResponse(BaseModel):
 
     query: str
     results: list[SearchResultItem] = Field(default_factory=list)
+
+
+class RelatedFragmentItem(BaseModel):
+    """A related fragment with link information."""
+
+    id: UUID
+    content: str = Field(..., validation_alias="raw_content")
+    summary: str | None = None
+    strength: float = Field(
+        ..., description="Link strength (0-1, higher is more related)"
+    )
+    link_type: str = Field(..., description="Type of relationship")
+    source_type: SourceType
+    source_ref: str | None = None
+    captured_at: datetime
+    topics: list[str] = Field(default_factory=list)
+    project: str | None = None
+
+    model_config = {
+        "from_attributes": True,
+        "populate_by_name": True,
+    }
+
+
+class RelatedFragmentsResponse(BaseModel):
+    """Response schema for related fragments."""
+
+    fragment_id: UUID
+    related: list[RelatedFragmentItem] = Field(default_factory=list)
