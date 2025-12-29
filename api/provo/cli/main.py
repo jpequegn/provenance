@@ -290,6 +290,173 @@ def search(
         sys.exit(1)
 
 
+# Icons for link types
+LINK_ICONS: dict[str, str] = {
+    "relates_to": "🔗",
+    "references": "📎",
+    "follows": "➡️",
+    "contradicts": "⚡",
+    "invalidates": "❌",
+}
+
+
+def format_strength(strength: float) -> str:
+    """Format link strength with color based on value."""
+    strength_str = f"{strength:.2f}"
+    if strength >= 0.9:
+        return typer.style(strength_str, fg=typer.colors.GREEN, bold=True)
+    elif strength >= 0.8:
+        return typer.style(strength_str, fg=typer.colors.GREEN)
+    elif strength >= 0.75:
+        return typer.style(strength_str, fg=typer.colors.YELLOW)
+    else:
+        return typer.style(strength_str, fg=typer.colors.WHITE)
+
+
+def format_related(result: dict[str, Any]) -> str:
+    """Format a single related fragment for display."""
+    source_type = result.get("source_type", "unknown")
+    captured_at = result.get("captured_at", "")
+    strength = result.get("strength", 0.0)
+    content = result.get("content", "")
+    link_type = result.get("link_type", "relates_to")
+
+    # Build header line: link icon + source icon + source type • date • Strength: X.XX
+    link_icon = LINK_ICONS.get(link_type, "🔗")
+    header = (
+        f"{link_icon} {format_source_type(source_type)} • "
+        f"{format_date(captured_at)} • "
+        f"Strength: {format_strength(strength)}"
+    )
+
+    # Content line with indent and quotes
+    content_line = f'   "{truncate_content(content)}"'
+
+    return f"{header}\n{content_line}"
+
+
+@app.command()
+def related(
+    fragment_id: Annotated[
+        str,
+        typer.Argument(help="Fragment ID to find related content for"),
+    ],
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-l", help="Maximum number of results"),
+    ] = 10,
+    link_type: Annotated[
+        str | None,
+        typer.Option("--type", "-t", help="Filter by link type (relates_to, references, etc.)"),
+    ] = None,
+) -> None:
+    """Show fragments related to a given fragment.
+
+    Displays fragments that are semantically similar or otherwise linked
+    to the specified fragment.
+
+    Examples:
+        provo related abc123-def456-...
+        provo related abc123 --limit 5
+        provo related abc123 --type relates_to
+    """
+    api_url = get_api_url()
+
+    # Build query parameters
+    params: dict[str, str | int] = {"limit": limit}
+    if link_type:
+        params["link_type"] = link_type
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.get(
+                f"{api_url}/api/fragments/{fragment_id}/related",
+                params=params,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                results = data.get("related", [])
+
+                if not results:
+                    typer.echo(
+                        typer.style("No related fragments found", fg=typer.colors.YELLOW)
+                        + f" for fragment {fragment_id[:8]}..."
+                    )
+                    sys.exit(0)
+
+                # Header
+                result_count = len(results)
+                typer.echo(
+                    f'\nFound {typer.style(str(result_count), bold=True)} '
+                    f'related fragment{"s" if result_count != 1 else ""}:\n'
+                )
+
+                # Display each result
+                for result in results:
+                    typer.echo(format_related(result))
+                    typer.echo()  # Blank line between results
+
+                sys.exit(0)
+
+            elif response.status_code == 404:
+                typer.echo(
+                    typer.style("✗ ", fg=typer.colors.RED, bold=True)
+                    + f"Fragment not found: {fragment_id}",
+                    err=True,
+                )
+                sys.exit(1)
+
+            elif response.status_code == 400:
+                try:
+                    error_data = response.json()
+                    detail = error_data.get("detail", response.text)
+                except Exception:
+                    detail = response.text
+                typer.echo(
+                    typer.style("✗ ", fg=typer.colors.RED, bold=True)
+                    + f"Invalid request: {detail}",
+                    err=True,
+                )
+                sys.exit(1)
+
+            else:
+                try:
+                    error_data = response.json()
+                    detail = error_data.get("detail", response.text)
+                except Exception:
+                    detail = response.text
+
+                typer.echo(
+                    typer.style("✗ ", fg=typer.colors.RED, bold=True)
+                    + f"Request failed: {detail}",
+                    err=True,
+                )
+                sys.exit(1)
+
+    except httpx.ConnectError:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Cannot connect to API at {api_url}. Is the server running?",
+            err=True,
+        )
+        sys.exit(1)
+    except httpx.TimeoutException:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + "Request timed out. Please try again.",
+            err=True,
+        )
+        sys.exit(1)
+    except Exception as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Unexpected error: {e}",
+            err=True,
+        )
+        sys.exit(1)
+
+
 def send_to_api(
     transcript: ParsedTranscript,
     source_type: Literal["zoom", "teams", "notes"],

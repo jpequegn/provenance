@@ -4,13 +4,25 @@ import logging
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 
-from provo.api.schemas import FragmentCreateRequest, FragmentResponse
+from provo.api.schemas import (
+    FragmentCreateRequest,
+    FragmentResponse,
+    RelatedFragmentItem,
+    RelatedFragmentsResponse,
+)
 from provo.processing import (
     get_assumption_extractor,
     get_decision_extractor,
     get_embedding_service,
 )
-from provo.storage import ContextFragment, SourceType, get_database, get_vector_store
+from provo.storage import (
+    ContextFragment,
+    FragmentLink,
+    LinkType,
+    SourceType,
+    get_database,
+    get_vector_store,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +99,73 @@ async def extract_assumptions_background(fragment_id: str, content: str) -> None
     except Exception as e:
         # Log but don't raise - this is a background task
         logger.error(f"Failed to extract assumptions for fragment {fragment_id}: {e}")
+
+
+# Similarity threshold for creating RELATES_TO links
+SIMILARITY_THRESHOLD = 0.75
+
+
+async def link_similar_fragments_background(
+    fragment_id: str,
+    embedding_vector: list[float],
+) -> None:
+    """Background task to find and link semantically similar fragments.
+
+    This runs asynchronously after the fragment is created and stored.
+    Failures are logged but don't affect the main request.
+    """
+    from uuid import UUID
+
+    try:
+        db = get_database()
+        vector_store = get_vector_store()
+
+        # Search for similar fragments (excluding self)
+        # ChromaDB uses cosine distance, so lower = more similar
+        # Cosine distance = 1 - cosine similarity
+        # For threshold 0.75 similarity, we want distance < 0.25
+        similar_results = await vector_store.search_similar(
+            query_vector=embedding_vector,
+            limit=10,  # Check up to 10 candidates
+        )
+
+        fragment_uuid = UUID(fragment_id)
+        links_created = 0
+
+        for result in similar_results:
+            # Skip self
+            if result.fragment_id == fragment_uuid:
+                continue
+
+            # Check if similarity is above threshold
+            # Distance is cosine distance, so similarity = 1 - distance
+            similarity = 1.0 - result.distance
+            if similarity < SIMILARITY_THRESHOLD:
+                continue
+
+            # Create bidirectional RELATES_TO link
+            link = FragmentLink(
+                source_id=fragment_uuid,
+                target_id=result.fragment_id,
+                link_type=LinkType.RELATES_TO,
+                strength=similarity,
+            )
+            await db.create_link(link)
+            links_created += 1
+
+            logger.info(
+                f"Linked fragment {fragment_id} to {result.fragment_id} "
+                f"with similarity {similarity:.2f}"
+            )
+
+        logger.info(
+            f"Fragment linking complete for {fragment_id}: "
+            f"{links_created} links created"
+        )
+
+    except Exception as e:
+        # Log but don't raise - this is a background task
+        logger.error(f"Failed to link similar fragments for {fragment_id}: {e}")
 
 
 @router.post(
@@ -170,6 +249,13 @@ async def create_fragment(
             request.content,
         )
 
+        # Schedule fragment linking based on semantic similarity
+        background_tasks.add_task(
+            link_similar_fragments_background,
+            str(created_fragment.id),
+            embedding_result.vector,
+        )
+
         return FragmentResponse.model_validate(created_fragment)
 
     except ConnectionError as e:
@@ -218,6 +304,94 @@ async def get_fragment(fragment_id: str) -> FragmentResponse:
         )
 
     return FragmentResponse.model_validate(fragment)
+
+
+@router.get(
+    "/{fragment_id}/related",
+    response_model=RelatedFragmentsResponse,
+    responses={
+        200: {"description": "Related fragments retrieved successfully"},
+        400: {"description": "Invalid fragment ID format"},
+        404: {"description": "Fragment not found"},
+    },
+)
+async def get_related_fragments(
+    fragment_id: str,
+    link_type: str | None = None,
+    limit: int = 20,
+) -> RelatedFragmentsResponse:
+    """Get fragments related to a given fragment.
+
+    Returns fragments that are semantically similar or otherwise linked
+    to the specified fragment.
+
+    Args:
+        fragment_id: The ID of the fragment to find related content for.
+        link_type: Optional filter by link type (relates_to, references, etc.).
+        limit: Maximum number of related fragments to return.
+    """
+    from uuid import UUID
+
+    db = get_database()
+
+    try:
+        uuid_id = UUID(fragment_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid fragment ID format",
+        ) from e
+
+    # Check that the fragment exists
+    fragment = await db.get_fragment(uuid_id)
+    if fragment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Fragment not found",
+        )
+
+    # Parse link type if provided
+    link_type_enum = None
+    if link_type:
+        try:
+            link_type_enum = LinkType(link_type.lower())
+        except ValueError as e:
+            valid_types = [t.value for t in LinkType]
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid link type: {link_type}. Valid types: {valid_types}",
+            ) from e
+
+    # Get related fragments
+    related_results = await db.get_related_fragments(
+        fragment_id=uuid_id,
+        link_type=link_type_enum,
+    )
+
+    # Limit results
+    related_results = related_results[:limit]
+
+    # Build response
+    related_items = [
+        RelatedFragmentItem(
+            id=frag.id,
+            content=frag.raw_content,
+            summary=frag.summary,
+            strength=strength,
+            link_type=frag_link_type.value,
+            source_type=frag.source_type,
+            source_ref=frag.source_ref,
+            captured_at=frag.captured_at,
+            topics=frag.topics,
+            project=frag.project,
+        )
+        for frag, strength, frag_link_type in related_results
+    ]
+
+    return RelatedFragmentsResponse(
+        fragment_id=uuid_id,
+        related=related_items,
+    )
 
 
 @router.get(
