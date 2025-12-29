@@ -9,11 +9,13 @@ from unittest.mock import MagicMock, patch
 from provo.capture.parsers import (
     ParsedTranscript,
     TranscriptSegment,
+    parse_frontmatter,
+    parse_markdown,
     parse_txt,
     parse_vtt,
     parse_vtt_timestamp,
 )
-from provo.capture.watcher import ProcessedFileTracker, TranscriptWatcher
+from provo.capture.watcher import NotesWatcher, ProcessedFileTracker, TranscriptWatcher
 
 
 class TestParseVttTimestamp:
@@ -403,3 +405,397 @@ Speaker: Hello world
 
             # Should not have processed any files
             assert len(callback_calls) == 0
+
+
+class TestParseFrontmatter:
+    """Tests for YAML frontmatter parsing."""
+
+    def test_parse_frontmatter_with_project_and_topics(self):
+        """Test parsing frontmatter with project and topics."""
+        content = """---
+project: billing
+topics: [architecture, decisions]
+---
+
+# Meeting Notes
+
+Content here.
+"""
+        frontmatter, body = parse_frontmatter(content)
+
+        assert frontmatter["project"] == "billing"
+        assert frontmatter["topics"] == ["architecture", "decisions"]
+        assert "# Meeting Notes" in body
+        assert "---" not in body
+
+    def test_parse_frontmatter_empty_when_missing(self):
+        """Test parsing content without frontmatter."""
+        content = """# Just a Regular Document
+
+No frontmatter here.
+"""
+        frontmatter, body = parse_frontmatter(content)
+
+        assert frontmatter == {}
+        assert body == content
+
+    def test_parse_frontmatter_with_quoted_values(self):
+        """Test parsing frontmatter with quoted values."""
+        content = """---
+project: "my-project"
+title: 'Some Title'
+---
+
+Body content.
+"""
+        frontmatter, body = parse_frontmatter(content)
+
+        assert frontmatter["project"] == "my-project"
+        assert frontmatter["title"] == "Some Title"
+
+    def test_parse_frontmatter_unclosed_returns_original(self):
+        """Test parsing unclosed frontmatter returns original content."""
+        content = """---
+project: billing
+
+No closing delimiter here.
+"""
+        frontmatter, body = parse_frontmatter(content)
+
+        assert frontmatter == {}
+        assert body == content
+
+
+class TestParseMarkdown:
+    """Tests for markdown file parsing."""
+
+    def test_parse_markdown_with_frontmatter(self):
+        """Test parsing markdown with frontmatter."""
+        md_content = """---
+project: billing
+topics: [architecture, decisions]
+---
+
+# Meeting Notes 2025-12-27
+
+Decided to use Redis for session caching because of its speed.
+
+## Next Steps
+
+- Implement Redis client
+- Add cache invalidation
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            f.write(md_content)
+            f.flush()
+            file_path = Path(f.name)
+
+        try:
+            result = parse_markdown(file_path)
+
+            assert isinstance(result, ParsedTranscript)
+            assert result.project == "billing"
+            assert result.topics == ["architecture", "decisions"]
+            assert "Redis" in result.content
+            assert "---" not in result.content  # Frontmatter stripped
+            assert len(result.segments) > 0
+
+        finally:
+            file_path.unlink()
+
+    def test_parse_markdown_without_frontmatter(self):
+        """Test parsing markdown without frontmatter."""
+        md_content = """# Regular Notes
+
+Just some notes without frontmatter.
+
+Another paragraph.
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            f.write(md_content)
+            f.flush()
+            file_path = Path(f.name)
+
+        try:
+            result = parse_markdown(file_path)
+
+            assert result.project is None
+            assert result.topics == []
+            assert "Regular Notes" in result.content
+            # 3 segments: heading, first paragraph, second paragraph
+            assert len(result.segments) == 3
+
+        finally:
+            file_path.unlink()
+
+    def test_parse_markdown_single_topic_string(self):
+        """Test parsing frontmatter with single topic as string."""
+        md_content = """---
+project: api
+topics: architecture
+---
+
+Content here.
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            f.write(md_content)
+            f.flush()
+            file_path = Path(f.name)
+
+        try:
+            result = parse_markdown(file_path)
+
+            assert result.topics == ["architecture"]
+
+        finally:
+            file_path.unlink()
+
+
+class TestNotesWatcher:
+    """Tests for the notes folder watcher."""
+
+    def test_notes_watcher_processes_existing_markdown(self):
+        """Test that notes watcher processes existing markdown files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            watch_path = Path(tmpdir)
+
+            # Create a markdown file
+            md_file = watch_path / "notes.md"
+            md_file.write_text("""---
+project: test-project
+topics: [testing]
+---
+
+# Test Notes
+
+Some test content here.
+""")
+
+            callback_calls: list[tuple] = []
+
+            def callback(transcript: ParsedTranscript, source_type: str) -> None:
+                callback_calls.append((transcript, source_type))
+
+            watcher = NotesWatcher(
+                watch_path=watch_path,
+                callback=callback,
+            )
+
+            count = watcher.process_existing()
+
+            assert count == 1
+            assert len(callback_calls) == 1
+            assert callback_calls[0][0].project == "test-project"
+            assert callback_calls[0][0].topics == ["testing"]
+            assert callback_calls[0][1] == "notes"
+
+    def test_notes_watcher_ignores_obsidian_folder(self):
+        """Test that notes watcher ignores .obsidian folder."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            watch_path = Path(tmpdir)
+
+            # Create .obsidian directory with a file
+            obsidian_dir = watch_path / ".obsidian"
+            obsidian_dir.mkdir()
+            (obsidian_dir / "config.md").write_text("# Config")
+
+            # Create a regular markdown file
+            (watch_path / "notes.md").write_text("# Notes")
+
+            callback_calls: list[tuple] = []
+
+            def callback(transcript: ParsedTranscript, source_type: str) -> None:
+                callback_calls.append((transcript, source_type))
+
+            watcher = NotesWatcher(
+                watch_path=watch_path,
+                callback=callback,
+                recursive=True,
+            )
+
+            count = watcher.process_existing()
+
+            # Should only process notes.md, not .obsidian/config.md
+            assert count == 1
+            assert len(callback_calls) == 1
+            assert "Notes" in callback_calls[0][0].content
+
+    def test_notes_watcher_ignores_git_folder(self):
+        """Test that notes watcher ignores .git folder."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            watch_path = Path(tmpdir)
+
+            # Create .git directory with a file
+            git_dir = watch_path / ".git"
+            git_dir.mkdir()
+            (git_dir / "readme.md").write_text("# Git Readme")
+
+            callback_calls: list[tuple] = []
+
+            def callback(transcript: ParsedTranscript, source_type: str) -> None:
+                callback_calls.append((transcript, source_type))
+
+            watcher = NotesWatcher(
+                watch_path=watch_path,
+                callback=callback,
+            )
+
+            count = watcher.process_existing()
+
+            # Should not process any files
+            assert count == 0
+            assert len(callback_calls) == 0
+
+    def test_notes_watcher_detects_new_files(self):
+        """Test that notes watcher detects new markdown files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            watch_path = Path(tmpdir)
+
+            callback_calls: list[tuple] = []
+
+            def callback(transcript: ParsedTranscript, source_type: str) -> None:
+                callback_calls.append((transcript, source_type))
+
+            watcher = NotesWatcher(
+                watch_path=watch_path,
+                callback=callback,
+            )
+
+            watcher.start()
+
+            try:
+                time.sleep(0.5)
+
+                # Create a new markdown file
+                new_file = watch_path / "new_note.md"
+                new_file.write_text("# New Note\n\nSome content.")
+
+                time.sleep(1.5)
+
+            finally:
+                watcher.stop()
+
+            assert len(callback_calls) == 1
+            assert "New Note" in callback_calls[0][0].content
+
+    def test_notes_watcher_detects_modified_files(self):
+        """Test that notes watcher detects modified files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            watch_path = Path(tmpdir)
+
+            # Create a file first
+            note_file = watch_path / "note.md"
+            note_file.write_text("# Original Content")
+
+            callback_calls: list[tuple] = []
+
+            def callback(transcript: ParsedTranscript, source_type: str) -> None:
+                callback_calls.append((transcript, source_type))
+
+            watcher = NotesWatcher(
+                watch_path=watch_path,
+                callback=callback,
+            )
+
+            # Process existing first
+            watcher.process_existing()
+            initial_count = len(callback_calls)
+
+            watcher.start()
+
+            try:
+                time.sleep(0.5)
+
+                # Modify the file
+                note_file.write_text("# Modified Content\n\nNew stuff here.")
+
+                time.sleep(1.5)
+
+            finally:
+                watcher.stop()
+
+            # Should have processed the modified file
+            assert len(callback_calls) > initial_count
+            # Find the modified callback
+            modified_call = [c for c in callback_calls if "Modified" in c[0].content]
+            assert len(modified_call) == 1
+
+    def test_notes_watcher_recursive(self):
+        """Test that notes watcher works recursively."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            watch_path = Path(tmpdir)
+
+            # Create nested directory structure
+            subdir = watch_path / "subfolder" / "deeper"
+            subdir.mkdir(parents=True)
+            (subdir / "nested.md").write_text("# Nested Note")
+
+            callback_calls: list[tuple] = []
+
+            def callback(transcript: ParsedTranscript, source_type: str) -> None:
+                callback_calls.append((transcript, source_type))
+
+            watcher = NotesWatcher(
+                watch_path=watch_path,
+                callback=callback,
+                recursive=True,
+            )
+
+            count = watcher.process_existing()
+
+            assert count == 1
+            assert "Nested" in callback_calls[0][0].content
+
+    def test_notes_watcher_non_recursive(self):
+        """Test that notes watcher respects non-recursive setting."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            watch_path = Path(tmpdir)
+
+            # Create files in root and subdirectory
+            (watch_path / "root.md").write_text("# Root Note")
+            subdir = watch_path / "subfolder"
+            subdir.mkdir()
+            (subdir / "nested.md").write_text("# Nested Note")
+
+            callback_calls: list[tuple] = []
+
+            def callback(transcript: ParsedTranscript, source_type: str) -> None:
+                callback_calls.append((transcript, source_type))
+
+            watcher = NotesWatcher(
+                watch_path=watch_path,
+                callback=callback,
+                recursive=False,
+            )
+
+            count = watcher.process_existing()
+
+            # Should only process root file
+            assert count == 1
+            assert "Root" in callback_calls[0][0].content
+
+    def test_notes_watcher_context_manager(self):
+        """Test notes watcher as context manager."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            watch_path = Path(tmpdir)
+
+            with NotesWatcher(
+                watch_path=watch_path,
+                callback=lambda t, s: None,
+            ) as watcher:
+                assert watcher.is_running()
+
+            assert not watcher.is_running()
+
+    def test_notes_watcher_validates_path(self):
+        """Test notes watcher validates the watch path."""
+        watcher = NotesWatcher(
+            watch_path="/nonexistent/path",
+            callback=lambda t, s: None,
+        )
+
+        try:
+            watcher.start()
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "does not exist" in str(e)

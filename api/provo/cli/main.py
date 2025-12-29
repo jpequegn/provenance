@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 import httpx
 import typer
 
-from provo.capture import ParsedTranscript, TranscriptWatcher
+from provo.capture import NotesWatcher, ParsedTranscript, TranscriptWatcher
 
 # Default API base URL
 DEFAULT_API_URL = "http://localhost:8000"
@@ -295,6 +295,7 @@ def send_to_api(
     source_type: Literal["zoom", "teams", "notes"],
     api_url: str,
     project: str | None = None,
+    topics: list[str] | None = None,
 ) -> str | None:
     """Send a parsed transcript to the API.
 
@@ -306,8 +307,16 @@ def send_to_api(
         "participants": transcript.participants,
     }
 
-    if project:
-        payload["project"] = project
+    # Use project from frontmatter if available, otherwise use CLI arg
+    effective_project = transcript.project or project
+    if effective_project:
+        payload["project"] = effective_project
+
+    # Use topics from frontmatter if available, otherwise use CLI arg
+    effective_topics = transcript.topics or topics or []
+    if effective_topics:
+        payload["topics"] = effective_topics
+
     if transcript.source_file:
         payload["source_ref"] = transcript.source_file
 
@@ -355,14 +364,24 @@ def watch(
             help="Process existing unprocessed files on startup",
         ),
     ] = True,
+    recursive: Annotated[
+        bool,
+        typer.Option(
+            "--recursive",
+            "-r",
+            help="Watch subdirectories recursively (only for notes type)",
+        ),
+    ] = True,
 ) -> None:
     """Watch a directory for new transcript files.
 
-    Automatically processes new VTT and TXT files and sends them to the API.
+    For zoom/teams: processes VTT and TXT files.
+    For notes: processes markdown files with frontmatter support.
 
     Examples:
         provo watch ~/Zoom --type zoom
         provo watch ~/Meetings -t teams -p billing
+        provo watch ~/Notes -t notes --recursive
         provo watch ./transcripts --process-existing
     """
     # Validate source type
@@ -424,13 +443,23 @@ def watch(
                 err=True,
             )
 
-    # Create watcher
+    # Create appropriate watcher based on source type
     source_type_literal: Literal["zoom", "teams", "notes"] = source_type  # type: ignore[assignment]
-    watcher = TranscriptWatcher(
-        watch_path=path,
-        source_type=source_type_literal,
-        callback=on_transcript,
-    )
+
+    if source_type == "notes":
+        watcher: TranscriptWatcher | NotesWatcher = NotesWatcher(
+            watch_path=path,
+            callback=on_transcript,
+            recursive=recursive,
+        )
+        file_types = "markdown notes"
+    else:
+        watcher = TranscriptWatcher(
+            watch_path=path,
+            source_type=source_type_literal,
+            callback=on_transcript,
+        )
+        file_types = "VTT/TXT transcripts"
 
     # Handle Ctrl+C gracefully
     stop_requested = False
@@ -450,8 +479,10 @@ def watch(
     # Start watching
     typer.echo(
         typer.style("👁️  ", bold=True)
-        + f"Watching {path} for {source_type} transcripts"
+        + f"Watching {path} for {file_types}"
     )
+    if source_type == "notes":
+        typer.echo(f"   Recursive: {recursive}")
     if project:
         typer.echo(f"   Project: {project}")
     typer.echo(f"   API: {api_url}")

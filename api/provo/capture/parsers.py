@@ -23,6 +23,8 @@ class ParsedTranscript:
     segments: list[TranscriptSegment] = field(default_factory=list)
     participants: list[str] = field(default_factory=list)
     source_file: str | None = None
+    project: str | None = None  # From frontmatter
+    topics: list[str] = field(default_factory=list)  # From frontmatter
 
 
 def parse_vtt_timestamp(timestamp: str) -> float:
@@ -187,4 +189,108 @@ def parse_txt(file_path: Path | str) -> ParsedTranscript:
         segments=segments,
         participants=sorted(participants),
         source_file=str(file_path),
+    )
+
+
+def parse_frontmatter(content: str) -> tuple[dict[str, str | list[str]], str]:
+    """Parse YAML frontmatter from markdown content.
+
+    Args:
+        content: The full markdown content.
+
+    Returns:
+        A tuple of (frontmatter_dict, remaining_content).
+        If no frontmatter is found, returns ({}, original_content).
+    """
+    # Check if content starts with frontmatter delimiter
+    if not content.startswith("---"):
+        return {}, content
+
+    # Find the closing delimiter
+    lines = content.split("\n")
+    end_index = -1
+    for i, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            end_index = i
+            break
+
+    if end_index == -1:
+        return {}, content
+
+    # Parse the frontmatter YAML-like content
+    frontmatter: dict[str, str | list[str]] = {}
+    for line in lines[1:end_index]:
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+
+        # Handle list values: [item1, item2]
+        if value.startswith("[") and value.endswith("]"):
+            items = value[1:-1].split(",")
+            frontmatter[key] = [item.strip().strip("'\"") for item in items if item.strip()]
+        else:
+            # Handle quoted strings
+            value = value.strip("'\"")
+            frontmatter[key] = value
+
+    # Return the content after frontmatter
+    remaining = "\n".join(lines[end_index + 1:]).strip()
+    return frontmatter, remaining
+
+
+def parse_markdown(file_path: Path | str) -> ParsedTranscript:
+    """Parse a markdown file with optional YAML frontmatter.
+
+    Markdown format example:
+    ```markdown
+    ---
+    project: billing
+    topics: [architecture, decisions]
+    ---
+
+    # Meeting Notes 2025-12-27
+
+    Decided to use Redis for session caching...
+    ```
+
+    Args:
+        file_path: Path to the markdown file.
+
+    Returns:
+        ParsedTranscript with content, project, and topics from frontmatter.
+    """
+    file_path = Path(file_path)
+    content = file_path.read_text(encoding="utf-8")
+
+    # Parse frontmatter
+    frontmatter, body = parse_frontmatter(content)
+
+    # Extract project and topics from frontmatter
+    project = frontmatter.get("project")
+    if isinstance(project, list):
+        project = project[0] if project else None
+
+    topics = frontmatter.get("topics", [])
+    if isinstance(topics, str):
+        topics = [topics]
+
+    # Create segments from paragraphs (similar to parse_txt)
+    segments: list[TranscriptSegment] = []
+    paragraphs = re.split(r"\n\s*\n", body.strip())
+
+    for paragraph in paragraphs:
+        text = paragraph.strip()
+        if text:
+            segments.append(TranscriptSegment(text=text))
+
+    return ParsedTranscript(
+        content=body,
+        segments=segments,
+        source_file=str(file_path),
+        project=project,
+        topics=list(topics),
     )
