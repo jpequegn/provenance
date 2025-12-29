@@ -5,7 +5,11 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 
 from provo.api.schemas import FragmentCreateRequest, FragmentResponse
-from provo.processing import get_decision_extractor, get_embedding_service
+from provo.processing import (
+    get_assumption_extractor,
+    get_decision_extractor,
+    get_embedding_service,
+)
 from provo.storage import ContextFragment, SourceType, get_database, get_vector_store
 
 logger = logging.getLogger(__name__)
@@ -49,6 +53,42 @@ async def extract_decisions_background(fragment_id: str, content: str) -> None:
         logger.error(f"Failed to extract decisions for fragment {fragment_id}: {e}")
 
 
+async def extract_assumptions_background(fragment_id: str, content: str) -> None:
+    """Background task to extract assumptions from fragment content.
+
+    This runs asynchronously after the fragment is created and stored.
+    Failures are logged but don't affect the main request.
+    """
+    from uuid import UUID
+
+    try:
+        db = get_database()
+        extractor = get_assumption_extractor()
+
+        # Extract assumptions using LLM
+        result = await extractor.extract_assumptions(
+            content=content,
+            fragment_id=UUID(fragment_id),
+        )
+
+        # Store each assumption in the database
+        for assumption in result.assumptions:
+            await db.create_assumption(assumption)
+            logger.info(
+                f"Stored assumption for fragment {fragment_id}: "
+                f"{assumption.statement[:50]}..."
+            )
+
+        logger.info(
+            f"Assumption extraction complete for {fragment_id}: "
+            f"{len(result.assumptions)} assumptions stored"
+        )
+
+    except Exception as e:
+        # Log but don't raise - this is a background task
+        logger.error(f"Failed to extract assumptions for fragment {fragment_id}: {e}")
+
+
 @router.post(
     "",
     response_model=FragmentResponse,
@@ -70,10 +110,10 @@ async def create_fragment(
     2. Creates the fragment in SQLite
     3. Generates an embedding for the content
     4. Stores the embedding in ChromaDB for semantic search
-    5. Triggers async decision extraction (background)
+    5. Triggers async decision and assumption extraction (background)
 
     The fragment is immediately searchable after creation.
-    Decision extraction runs in the background and doesn't block the response.
+    Decision and assumption extraction run in the background and don't block the response.
     """
     # Get services
     db = get_database()
@@ -118,9 +158,14 @@ async def create_fragment(
             metadata=metadata if metadata else None,
         )
 
-        # Schedule decision extraction as background task
+        # Schedule decision and assumption extraction as background tasks
         background_tasks.add_task(
             extract_decisions_background,
+            str(created_fragment.id),
+            request.content,
+        )
+        background_tasks.add_task(
+            extract_assumptions_background,
             str(created_fragment.id),
             request.content,
         )
