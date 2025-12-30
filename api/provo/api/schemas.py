@@ -156,3 +156,35 @@ class AssumptionUpdateRequest(BaseModel):
         None,
         description="ID of the fragment that invalidates this assumption",
     )
+
+
+# Graph visualization schemas
+
+
+class GraphNode(BaseModel):
+    """A node in the fragment relationship graph."""
+
+    id: str = Field(..., description="Fragment ID")
+    label: str = Field(..., description="Display label (truncated content)")
+    source_type: SourceType = Field(..., description="Type of fragment source")
+    project: str | None = Field(None, description="Project name")
+    captured_at: datetime = Field(..., description="When the fragment was captured")
+    topics: list[str] = Field(default_factory=list, description="Fragment topics")
+    connections: int = Field(0, description="Number of connections (for sizing)")
+
+
+class GraphEdge(BaseModel):
+    """An edge in the fragment relationship graph."""
+
+    id: str = Field(..., description="Link ID")
+    source: str = Field(..., description="Source fragment ID")
+    target: str = Field(..., description="Target fragment ID")
+    link_type: str = Field(..., description="Type of relationship")
+    strength: float = Field(..., description="Link strength (0-1)")
+
+
+class GraphDataResponse(BaseModel):
+    """Response schema for graph visualization data."""
+
+    nodes: list[GraphNode] = Field(default_factory=list, description="Graph nodes")
+    edges: list[GraphEdge] = Field(default_factory=list, description="Graph edges")

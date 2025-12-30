@@ -20,6 +20,9 @@ export default function Layout() {
           <NavLink to="/timeline" className={({ isActive }) => isActive ? 'active' : ''}>
             Timeline
           </NavLink>
+          <NavLink to="/graph" className={({ isActive }) => isActive ? 'active' : ''}>
+            Graph
+          </NavLink>
         </div>
       </nav>
       <main className="main-content">

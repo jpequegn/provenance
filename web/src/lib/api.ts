@@ -75,6 +75,30 @@ export interface AssumptionUpdateData {
   invalidated_by?: string;
 }
 
+// Graph visualization types
+export interface GraphNode {
+  id: string;
+  label: string;
+  source_type: 'quick_capture' | 'zoom' | 'teams' | 'notes';
+  project: string | null;
+  captured_at: string;
+  topics: string[];
+  connections: number;
+}
+
+export interface GraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  link_type: string;
+  strength: number;
+}
+
+export interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
 // API base URL - uses proxy in development
 const API_BASE = '/api';
 
@@ -182,6 +206,25 @@ export const api = {
         method: 'PATCH',
         body: JSON.stringify(data),
       });
+    },
+  },
+
+  graph: {
+    getData: (params?: {
+      project?: string;
+      source_type?: string;
+      since?: string;
+      until?: string;
+      limit?: number;
+    }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.project) searchParams.set('project', params.project);
+      if (params?.source_type) searchParams.set('source_type', params.source_type);
+      if (params?.since) searchParams.set('since', params.since);
+      if (params?.until) searchParams.set('until', params.until);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const query = searchParams.toString();
+      return fetchApi<GraphData>(`/graph${query ? `?${query}` : ''}`);
     },
   },
 };
