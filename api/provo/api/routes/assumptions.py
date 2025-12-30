@@ -1,5 +1,6 @@
 """Assumptions API endpoints."""
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
@@ -114,6 +115,7 @@ async def invalidate_assumption(
 async def list_assumptions(
     fragment_id: str | None = None,
     project: str | None = None,
+    since: datetime | None = None,
     still_valid: bool | None = None,
     limit: int = 50,
 ) -> list[AssumptionResponse]:
@@ -122,6 +124,7 @@ async def list_assumptions(
     Args:
         fragment_id: Filter by parent fragment ID.
         project: Filter by project name.
+        since: Filter by assumptions created after this datetime.
         still_valid: Filter by validity status (true/false/null for not yet checked).
         limit: Maximum number of results to return.
     """
@@ -148,6 +151,7 @@ async def list_assumptions(
     assumptions = await db.list_assumptions(
         fragment_id=fragment_uuid,
         project=project,
+        since=since,
         valid_only=valid_only,
         invalid_only=invalid_only,
         limit=limit,

@@ -367,6 +367,7 @@ class Database:
         *,
         fragment_id: UUID | None = None,
         project: str | None = None,
+        since: datetime | None = None,
         valid_only: bool = False,
         invalid_only: bool = False,
         limit: int = 100,
@@ -386,6 +387,9 @@ class Database:
         if fragment_id:
             query += " AND fragment_id = ?"
             params.append(str(fragment_id))
+        if since:
+            query += " AND a.created_at >= ?" if project else " AND created_at >= ?"
+            params.append(since.isoformat())
         if valid_only:
             query += " AND (still_valid = 1 OR still_valid IS NULL)"
         if invalid_only:

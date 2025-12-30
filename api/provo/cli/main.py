@@ -2,9 +2,10 @@
 
 import logging
 import os
+import re
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -420,6 +421,337 @@ def related(
                 )
                 sys.exit(1)
 
+            else:
+                try:
+                    error_data = response.json()
+                    detail = error_data.get("detail", response.text)
+                except Exception:
+                    detail = response.text
+
+                typer.echo(
+                    typer.style("✗ ", fg=typer.colors.RED, bold=True)
+                    + f"Request failed: {detail}",
+                    err=True,
+                )
+                sys.exit(1)
+
+    except httpx.ConnectError:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Cannot connect to API at {api_url}. Is the server running?",
+            err=True,
+        )
+        sys.exit(1)
+    except httpx.TimeoutException:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + "Request timed out. Please try again.",
+            err=True,
+        )
+        sys.exit(1)
+    except Exception as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Unexpected error: {e}",
+            err=True,
+        )
+        sys.exit(1)
+
+
+def parse_period(period: str) -> datetime | None:
+    """Parse a period string like '7d', '30d', '2w' into a datetime.
+
+    Returns the datetime representing the start of the period (now - duration).
+    Returns None if the period string is invalid.
+
+    Supported formats:
+        - Nd: N days (e.g., '7d', '30d')
+        - Nw: N weeks (e.g., '2w', '4w')
+        - Nm: N months (approximate, 30 days each) (e.g., '1m', '3m')
+    """
+    pattern = r"^(\d+)([dwm])$"
+    match = re.match(pattern, period.lower())
+    if not match:
+        return None
+
+    value = int(match.group(1))
+    unit = match.group(2)
+
+    if unit == "d":
+        delta = timedelta(days=value)
+    elif unit == "w":
+        delta = timedelta(weeks=value)
+    elif unit == "m":
+        delta = timedelta(days=value * 30)  # Approximate month
+    else:
+        return None
+
+    return datetime.now() - delta
+
+
+def format_confidence(confidence: float) -> str:
+    """Format confidence score with color based on value."""
+    confidence_str = f"{confidence:.2f}"
+    if confidence >= 0.9:
+        return typer.style(confidence_str, fg=typer.colors.GREEN, bold=True)
+    elif confidence >= 0.7:
+        return typer.style(confidence_str, fg=typer.colors.GREEN)
+    elif confidence >= 0.5:
+        return typer.style(confidence_str, fg=typer.colors.YELLOW)
+    else:
+        return typer.style(confidence_str, fg=typer.colors.WHITE)
+
+
+def format_decision(decision: dict[str, Any]) -> str:
+    """Format a single decision for display."""
+    what = decision.get("what", "")
+    why = decision.get("why", "")
+    confidence = decision.get("confidence", 0.0)
+    created_at = decision.get("created_at", "")
+
+    # Header: checkmark + decision + date + confidence
+    header = (
+        typer.style("✓ ", fg=typer.colors.GREEN, bold=True)
+        + f"{truncate_content(what, 60)} • "
+        + f"{format_date(created_at)} • "
+        + f"{format_confidence(confidence)} confidence"
+    )
+
+    # Reason line if available
+    if why:
+        reason_line = f"  Because: {truncate_content(why, 70)}"
+        return f"{header}\n{reason_line}"
+
+    return header
+
+
+def format_assumption(assumption: dict[str, Any]) -> str:
+    """Format a single assumption for display."""
+    statement = assumption.get("statement", "")
+    still_valid = assumption.get("still_valid")
+    explicit = assumption.get("explicit", True)
+    created_at = assumption.get("created_at", "")
+
+    # Status icon
+    if still_valid is False:
+        icon = typer.style("✗ ", fg=typer.colors.RED, bold=True)
+        status = typer.style("[INVALID]", fg=typer.colors.RED)
+    elif still_valid is True:
+        icon = typer.style("✓ ", fg=typer.colors.GREEN, bold=True)
+        status = typer.style("[VALID]", fg=typer.colors.GREEN)
+    else:
+        icon = typer.style("? ", fg=typer.colors.YELLOW, bold=True)
+        status = typer.style("[UNCHECKED]", fg=typer.colors.YELLOW)
+
+    # Type indicator
+    type_indicator = "explicit" if explicit else "implicit"
+
+    # Header: icon + statement + date + status
+    header = (
+        f"{icon}{truncate_content(statement, 60)} • "
+        + f"{format_date(created_at)} • "
+        + f"{type_indicator} {status}"
+    )
+
+    return header
+
+
+@app.command()
+def decisions(
+    project: Annotated[
+        str | None,
+        typer.Option("-p", "--project", help="Filter by project name"),
+    ] = None,
+    last: Annotated[
+        str | None,
+        typer.Option("--last", help="Filter by time period (e.g., 7d, 30d, 2w)"),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-l", help="Maximum number of results"),
+    ] = 20,
+) -> None:
+    """List decisions with optional filtering.
+
+    Examples:
+        provo decisions
+        provo decisions --project billing --last 7d
+        provo decisions -p auth --limit 5
+    """
+    api_url = get_api_url()
+
+    # Build query parameters
+    params: dict[str, str | int] = {"limit": limit}
+    if project:
+        params["project"] = project
+
+    # Parse --last period
+    if last:
+        since_dt = parse_period(last)
+        if since_dt is None:
+            typer.echo(
+                typer.style("✗ ", fg=typer.colors.RED, bold=True)
+                + f"Invalid period format: {last}. Use formats like 7d, 30d, 2w, 1m",
+                err=True,
+            )
+            sys.exit(1)
+        params["since"] = since_dt.isoformat()
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.get(
+                f"{api_url}/api/decisions",
+                params=params,
+            )
+
+            if response.status_code == 200:
+                results = response.json()
+
+                if not results:
+                    msg = "No decisions found"
+                    if project:
+                        msg += f" for project '{project}'"
+                    if last:
+                        msg += f" in the last {last}"
+                    typer.echo(typer.style(msg, fg=typer.colors.YELLOW))
+                    sys.exit(0)
+
+                # Header
+                header = "Decisions"
+                if last:
+                    header += f" (last {last})"
+                header += ":"
+
+                typer.echo(f"\n{typer.style(header, bold=True)}\n")
+
+                # Display each decision
+                for decision in results:
+                    typer.echo(format_decision(decision))
+                    typer.echo()  # Blank line between results
+
+                sys.exit(0)
+            else:
+                try:
+                    error_data = response.json()
+                    detail = error_data.get("detail", response.text)
+                except Exception:
+                    detail = response.text
+
+                typer.echo(
+                    typer.style("✗ ", fg=typer.colors.RED, bold=True)
+                    + f"Request failed: {detail}",
+                    err=True,
+                )
+                sys.exit(1)
+
+    except httpx.ConnectError:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Cannot connect to API at {api_url}. Is the server running?",
+            err=True,
+        )
+        sys.exit(1)
+    except httpx.TimeoutException:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + "Request timed out. Please try again.",
+            err=True,
+        )
+        sys.exit(1)
+    except Exception as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Unexpected error: {e}",
+            err=True,
+        )
+        sys.exit(1)
+
+
+@app.command()
+def assumptions(
+    project: Annotated[
+        str | None,
+        typer.Option("-p", "--project", help="Filter by project name"),
+    ] = None,
+    last: Annotated[
+        str | None,
+        typer.Option("--last", help="Filter by time period (e.g., 7d, 30d, 2w)"),
+    ] = None,
+    invalid: Annotated[
+        bool,
+        typer.Option("--invalid", help="Show only invalid assumptions"),
+    ] = False,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-l", help="Maximum number of results"),
+    ] = 20,
+) -> None:
+    """List assumptions with optional filtering.
+
+    Examples:
+        provo assumptions
+        provo assumptions --project auth
+        provo assumptions --invalid
+        provo assumptions -p billing --last 30d
+    """
+    api_url = get_api_url()
+
+    # Build query parameters
+    params: dict[str, str | int | bool] = {"limit": limit}
+    if project:
+        params["project"] = project
+    if invalid:
+        params["still_valid"] = False
+
+    # Parse --last period
+    if last:
+        since_dt = parse_period(last)
+        if since_dt is None:
+            typer.echo(
+                typer.style("✗ ", fg=typer.colors.RED, bold=True)
+                + f"Invalid period format: {last}. Use formats like 7d, 30d, 2w, 1m",
+                err=True,
+            )
+            sys.exit(1)
+        params["since"] = since_dt.isoformat()
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.get(
+                f"{api_url}/api/assumptions",
+                params=params,
+            )
+
+            if response.status_code == 200:
+                results = response.json()
+
+                if not results:
+                    msg = "No assumptions found"
+                    if project:
+                        msg += f" for project '{project}'"
+                    if last:
+                        msg += f" in the last {last}"
+                    if invalid:
+                        msg += " (invalid only)"
+                    typer.echo(typer.style(msg, fg=typer.colors.YELLOW))
+                    sys.exit(0)
+
+                # Header
+                header = "Assumptions"
+                if invalid:
+                    header += " (invalid only)"
+                elif last:
+                    header += f" (last {last})"
+                header += ":"
+
+                typer.echo(f"\n{typer.style(header, bold=True)}\n")
+
+                # Display each assumption
+                for assumption in results:
+                    typer.echo(format_assumption(assumption))
+                    typer.echo()  # Blank line between results
+
+                sys.exit(0)
             else:
                 try:
                     error_data = response.json()
