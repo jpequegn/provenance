@@ -1182,5 +1182,624 @@ def serve(
             proc.wait(timeout=5)
 
 
+# Teams subcommand group
+teams_app = typer.Typer(
+    name="teams",
+    help="Microsoft Teams integration commands.",
+)
+app.add_typer(teams_app, name="teams")
+
+
+def get_teams_config():
+    """Get Teams configuration from environment."""
+    from provo.integrations import TeamsConfig
+
+    # Default token and state files
+    config_dir = Path.home() / ".provo"
+    token_file = config_dir / "teams_token.json"
+
+    return TeamsConfig.from_env(token_file=token_file)
+
+
+def get_teams_state_file() -> Path:
+    """Get path to Teams poller state file."""
+    return Path.home() / ".provo" / "teams_state.json"
+
+
+@teams_app.command("login")
+def teams_login() -> None:
+    """Authenticate with Microsoft Teams.
+
+    Opens a browser for OAuth2 authentication. Requires environment variables:
+        TEAMS_CLIENT_ID: Azure AD application client ID
+        TEAMS_CLIENT_SECRET: Azure AD application client secret (optional)
+        TEAMS_TENANT_ID: Azure AD tenant ID (default: common)
+
+    Example:
+        export TEAMS_CLIENT_ID=your-app-id
+        provo teams login
+    """
+    import asyncio
+    from provo.integrations import TeamsClient
+
+    try:
+        config = get_teams_config()
+    except ValueError as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + str(e),
+            err=True,
+        )
+        typer.echo(
+            "\nSet the required environment variables:\n"
+            "  export TEAMS_CLIENT_ID=your-app-id\n"
+            "  export TEAMS_CLIENT_SECRET=your-secret  # optional\n"
+            "  export TEAMS_TENANT_ID=your-tenant-id   # optional, default: common"
+        )
+        sys.exit(1)
+
+    client = TeamsClient(config)
+
+    if client.is_authenticated:
+        typer.echo(
+            typer.style("✓ ", fg=typer.colors.GREEN, bold=True)
+            + "Already authenticated with Teams"
+        )
+        if typer.confirm("Re-authenticate?", default=False):
+            client.logout()
+        else:
+            sys.exit(0)
+
+    typer.echo("Opening browser for Teams authentication...")
+    typer.echo(
+        typer.style("ℹ ", fg=typer.colors.BLUE, bold=True)
+        + "Sign in with your Microsoft account and grant permissions."
+    )
+
+    async def do_auth() -> bool:
+        return await client.authenticate_with_browser(timeout=120)
+
+    try:
+        success = asyncio.run(do_auth())
+    except Exception as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Authentication failed: {e}",
+            err=True,
+        )
+        sys.exit(1)
+
+    if success:
+        typer.echo(
+            typer.style("✓ ", fg=typer.colors.GREEN, bold=True)
+            + "Successfully authenticated with Microsoft Teams!"
+        )
+        sys.exit(0)
+    else:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + "Authentication failed or timed out",
+            err=True,
+        )
+        sys.exit(1)
+
+
+@teams_app.command("logout")
+def teams_logout() -> None:
+    """Clear Teams authentication."""
+    from provo.integrations import TeamsClient
+
+    try:
+        config = get_teams_config()
+        client = TeamsClient(config)
+        client.logout()
+        typer.echo(
+            typer.style("✓ ", fg=typer.colors.GREEN, bold=True)
+            + "Logged out of Microsoft Teams"
+        )
+    except ValueError:
+        typer.echo(
+            typer.style("ℹ ", fg=typer.colors.BLUE)
+            + "No Teams authentication to clear"
+        )
+
+
+@teams_app.command("status")
+def teams_status() -> None:
+    """Check Teams authentication status."""
+    from provo.integrations import TeamsClient
+
+    try:
+        config = get_teams_config()
+    except ValueError as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.YELLOW)
+            + f"Teams not configured: {e}"
+        )
+        sys.exit(1)
+
+    client = TeamsClient(config)
+
+    if client.is_authenticated:
+        typer.echo(
+            typer.style("✓ ", fg=typer.colors.GREEN, bold=True)
+            + "Authenticated with Microsoft Teams"
+        )
+    else:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED)
+            + "Not authenticated. Run 'provo teams login' to authenticate."
+        )
+
+
+@teams_app.command("teams")
+def teams_list_teams() -> None:
+    """List all Teams you are a member of."""
+    import asyncio
+    from provo.integrations import TeamsClient
+
+    try:
+        config = get_teams_config()
+    except ValueError as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True) + str(e),
+            err=True,
+        )
+        sys.exit(1)
+
+    client = TeamsClient(config)
+
+    if not client.is_authenticated:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED)
+            + "Not authenticated. Run 'provo teams login' first.",
+            err=True,
+        )
+        sys.exit(1)
+
+    async def list_teams() -> list[dict[str, str]]:
+        return await client.list_teams()
+
+    try:
+        teams = asyncio.run(list_teams())
+    except Exception as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Failed to list teams: {e}",
+            err=True,
+        )
+        sys.exit(1)
+
+    if not teams:
+        typer.echo(typer.style("No teams found", fg=typer.colors.YELLOW))
+        sys.exit(0)
+
+    typer.echo(f"\n{typer.style('Your Teams:', bold=True)}\n")
+
+    for team in teams:
+        typer.echo(
+            f"  💬 {typer.style(team['name'], bold=True)}"
+        )
+        if team.get("description"):
+            typer.echo(f"     {team['description'][:60]}...")
+        typer.echo(f"     ID: {team['id']}")
+        typer.echo()
+
+
+@teams_app.command("channels")
+def teams_list_channels(
+    team_id: Annotated[
+        str,
+        typer.Argument(help="Team ID (from 'provo teams teams')"),
+    ],
+) -> None:
+    """List channels in a Team."""
+    import asyncio
+    from provo.integrations import TeamsClient
+
+    try:
+        config = get_teams_config()
+    except ValueError as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True) + str(e),
+            err=True,
+        )
+        sys.exit(1)
+
+    client = TeamsClient(config)
+
+    if not client.is_authenticated:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED)
+            + "Not authenticated. Run 'provo teams login' first.",
+            err=True,
+        )
+        sys.exit(1)
+
+    async def list_channels() -> list:
+        return await client.list_channels(team_id)
+
+    try:
+        channels = asyncio.run(list_channels())
+    except Exception as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Failed to list channels: {e}",
+            err=True,
+        )
+        sys.exit(1)
+
+    if not channels:
+        typer.echo(typer.style("No channels found", fg=typer.colors.YELLOW))
+        sys.exit(0)
+
+    typer.echo(f"\n{typer.style(f'Channels in {channels[0].team_name}:', bold=True)}\n")
+
+    for channel in channels:
+        typer.echo(
+            f"  📢 {typer.style(channel.name, bold=True)}"
+        )
+        if channel.description:
+            typer.echo(f"     {channel.description[:60]}...")
+        typer.echo(f"     ID: {channel.id}")
+        typer.echo()
+
+
+@teams_app.command("add")
+def teams_add_channel(
+    team_id: Annotated[
+        str,
+        typer.Argument(help="Team ID"),
+    ],
+    channel_id: Annotated[
+        str,
+        typer.Argument(help="Channel ID"),
+    ],
+    project: Annotated[
+        str | None,
+        typer.Option("-p", "--project", help="Project name for fragments"),
+    ] = None,
+    topics: Annotated[
+        list[str] | None,
+        typer.Option("-t", "--topic", help="Default topics for fragments"),
+    ] = None,
+) -> None:
+    """Add a channel to monitor for messages.
+
+    Example:
+        provo teams add TEAM_ID CHANNEL_ID -p my-project -t meetings
+    """
+    import asyncio
+    from provo.integrations import TeamsClient, TeamsPoller
+
+    try:
+        config = get_teams_config()
+    except ValueError as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True) + str(e),
+            err=True,
+        )
+        sys.exit(1)
+
+    client = TeamsClient(config)
+
+    if not client.is_authenticated:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED)
+            + "Not authenticated. Run 'provo teams login' first.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Get team and channel info
+    async def get_info() -> tuple:
+        channels = await client.list_channels(team_id)
+        for ch in channels:
+            if ch.id == channel_id:
+                return ch.team_name, ch.name
+        raise ValueError(f"Channel {channel_id} not found in team")
+
+    try:
+        team_name, channel_name = asyncio.run(get_info())
+    except Exception as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Failed to get channel info: {e}",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Add to poller
+    poller = TeamsPoller(
+        client=client,
+        state_file=get_teams_state_file(),
+    )
+
+    poller.add_channel(
+        team_id=team_id,
+        team_name=team_name,
+        channel_id=channel_id,
+        channel_name=channel_name,
+        project=project,
+        topics=topics or [],
+    )
+
+    typer.echo(
+        typer.style("✓ ", fg=typer.colors.GREEN, bold=True)
+        + f"Added channel: {team_name}/{channel_name}"
+    )
+    if project:
+        typer.echo(f"  Project: {project}")
+    if topics:
+        typer.echo(f"  Topics: {', '.join(topics)}")
+
+
+@teams_app.command("remove")
+def teams_remove_channel(
+    channel_id: Annotated[
+        str,
+        typer.Argument(help="Channel ID to remove"),
+    ],
+) -> None:
+    """Remove a channel from monitoring."""
+    from provo.integrations import TeamsClient, TeamsPoller
+
+    try:
+        config = get_teams_config()
+    except ValueError as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True) + str(e),
+            err=True,
+        )
+        sys.exit(1)
+
+    client = TeamsClient(config)
+    poller = TeamsPoller(
+        client=client,
+        state_file=get_teams_state_file(),
+    )
+
+    if poller.remove_channel(channel_id):
+        typer.echo(
+            typer.style("✓ ", fg=typer.colors.GREEN, bold=True)
+            + "Channel removed from monitoring"
+        )
+    else:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.YELLOW)
+            + "Channel not found in monitored list"
+        )
+
+
+@teams_app.command("list")
+def teams_list_monitored() -> None:
+    """List channels being monitored."""
+    from provo.integrations import TeamsClient, TeamsPoller
+
+    try:
+        config = get_teams_config()
+    except ValueError as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True) + str(e),
+            err=True,
+        )
+        sys.exit(1)
+
+    client = TeamsClient(config)
+    poller = TeamsPoller(
+        client=client,
+        state_file=get_teams_state_file(),
+    )
+
+    channels = poller.monitored_channels
+
+    if not channels:
+        typer.echo(
+            typer.style("No channels being monitored", fg=typer.colors.YELLOW)
+        )
+        typer.echo("\nAdd channels with: provo teams add TEAM_ID CHANNEL_ID")
+        sys.exit(0)
+
+    typer.echo(f"\n{typer.style('Monitored Channels:', bold=True)}\n")
+
+    for channel in channels:
+        typer.echo(
+            f"  📢 {typer.style(channel.team_name, bold=True)}/{channel.channel_name}"
+        )
+        if channel.project:
+            typer.echo(f"     Project: {channel.project}")
+        if channel.topics:
+            typer.echo(f"     Topics: {', '.join(channel.topics)}")
+        typer.echo(f"     Channel ID: {channel.channel_id}")
+        typer.echo()
+
+
+@teams_app.command("import")
+def teams_import(
+    export_file: Annotated[
+        Path,
+        typer.Argument(help="Path to Teams export file (JSON or HTML)"),
+    ],
+    project: Annotated[
+        str | None,
+        typer.Option("-p", "--project", help="Project name for fragments"),
+    ] = None,
+    topics: Annotated[
+        list[str] | None,
+        typer.Option("-t", "--topic", help="Topics for fragments"),
+    ] = None,
+) -> None:
+    """Import a Teams export file as fragments.
+
+    Alternative to Graph API integration. Export your Teams chat history
+    and import it directly.
+
+    Example:
+        provo teams import chat_export.json -p my-project
+    """
+    import asyncio
+    from provo.integrations.teams_import import import_teams_export
+
+    if not export_file.exists():
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"File not found: {export_file}",
+            err=True,
+        )
+        sys.exit(1)
+
+    api_url = get_api_url()
+
+    typer.echo(f"Importing Teams export from {export_file}...")
+
+    async def do_import() -> list[str]:
+        return await import_teams_export(
+            export_path=export_file,
+            api_url=api_url,
+            project=project,
+            topics=topics or [],
+        )
+
+    try:
+        fragment_ids = asyncio.run(do_import())
+    except Exception as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Import failed: {e}",
+            err=True,
+        )
+        sys.exit(1)
+
+    if fragment_ids:
+        typer.echo(
+            typer.style("✓ ", fg=typer.colors.GREEN, bold=True)
+            + f"Imported {len(fragment_ids)} message(s) as fragments"
+        )
+    else:
+        typer.echo(
+            typer.style("⚠ ", fg=typer.colors.YELLOW)
+            + "No messages found in export file"
+        )
+
+
+@teams_app.command("poll")
+def teams_poll(
+    interval: Annotated[
+        int,
+        typer.Option("--interval", "-i", help="Poll interval in seconds"),
+    ] = 60,
+    once: Annotated[
+        bool,
+        typer.Option("--once", help="Poll once and exit"),
+    ] = False,
+) -> None:
+    """Poll Teams channels for new messages.
+
+    Fetches messages from monitored channels and creates fragments.
+
+    Examples:
+        provo teams poll              # Poll continuously every 60s
+        provo teams poll --once       # Poll once and exit
+        provo teams poll -i 30        # Poll every 30 seconds
+    """
+    import asyncio
+    from provo.integrations import TeamsClient, TeamsPoller
+
+    try:
+        config = get_teams_config()
+    except ValueError as e:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True) + str(e),
+            err=True,
+        )
+        sys.exit(1)
+
+    client = TeamsClient(config)
+
+    if not client.is_authenticated:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED)
+            + "Not authenticated. Run 'provo teams login' first.",
+            err=True,
+        )
+        sys.exit(1)
+
+    api_url = get_api_url()
+    poller = TeamsPoller(
+        client=client,
+        api_url=api_url,
+        state_file=get_teams_state_file(),
+        poll_interval=interval,
+    )
+
+    if not poller.monitored_channels:
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.YELLOW)
+            + "No channels configured for monitoring"
+        )
+        typer.echo("\nAdd channels with: provo teams add TEAM_ID CHANNEL_ID")
+        sys.exit(1)
+
+    if once:
+        typer.echo("Polling Teams channels once...")
+
+        async def do_poll() -> dict[str, int]:
+            return await poller.poll_once()
+
+        try:
+            results = asyncio.run(do_poll())
+            total = sum(results.values())
+            typer.echo(
+                typer.style("✓ ", fg=typer.colors.GREEN, bold=True)
+                + f"Processed {total} message(s)"
+            )
+            for channel, count in results.items():
+                if count > 0:
+                    typer.echo(f"  {channel}: {count}")
+        except Exception as e:
+            typer.echo(
+                typer.style("✗ ", fg=typer.colors.RED, bold=True)
+                + f"Poll failed: {e}",
+                err=True,
+            )
+            sys.exit(1)
+    else:
+        # Continuous polling
+        typer.echo(
+            typer.style("👁️  ", bold=True)
+            + f"Polling {len(poller.monitored_channels)} channel(s) every {interval}s"
+        )
+        typer.echo(f"   API: {api_url}")
+        typer.echo("   Press Ctrl+C to stop\n")
+
+        stop_requested = False
+
+        def signal_handler(signum: int, frame: object) -> None:
+            nonlocal stop_requested
+            if stop_requested:
+                sys.exit(1)
+            stop_requested = True
+            typer.echo("\n" + typer.style("Stopping...", fg=typer.colors.YELLOW))
+            poller.stop()
+
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+
+        async def run_poller() -> None:
+            poller.start()
+            while poller.is_running and not stop_requested:
+                await asyncio.sleep(1)
+
+        try:
+            asyncio.run(run_poller())
+        except Exception as e:
+            typer.echo(
+                typer.style("✗ ", fg=typer.colors.RED, bold=True)
+                + f"Poller error: {e}",
+                err=True,
+            )
+            sys.exit(1)
+
+
 if __name__ == "__main__":
     app()
