@@ -1021,5 +1021,166 @@ def watch(
     )
 
 
+@app.command()
+def serve(
+    api_port: Annotated[
+        int,
+        typer.Option("--api-port", help="Port for the API server"),
+    ] = 8000,
+    ui_port: Annotated[
+        int,
+        typer.Option("--ui-port", help="Port for the web UI"),
+    ] = 3000,
+    api_only: Annotated[
+        bool,
+        typer.Option("--api-only", help="Only start the API server"),
+    ] = False,
+    ui_only: Annotated[
+        bool,
+        typer.Option("--ui-only", help="Only start the web UI (requires API running)"),
+    ] = False,
+) -> None:
+    """Start the Provenance servers.
+
+    By default, starts both the API server and the web UI.
+    The web UI proxies API requests to the API server.
+
+    Examples:
+        provo serve                    # Start both API and UI
+        provo serve --api-only         # Start only the API
+        provo serve --ui-only          # Start only the UI (requires API)
+        provo serve --api-port 9000    # Use custom API port
+    """
+    import subprocess
+    import time
+
+    # Find the web directory relative to this file
+    # The structure is: api/provo/cli/main.py -> web/
+    api_dir = Path(__file__).parent.parent.parent.parent
+    web_dir = api_dir.parent / "web"
+
+    if not web_dir.exists():
+        typer.echo(
+            typer.style("✗ ", fg=typer.colors.RED, bold=True)
+            + f"Web directory not found at {web_dir}",
+            err=True,
+        )
+        sys.exit(1)
+
+    processes: list[subprocess.Popen] = []
+    stop_requested = False
+
+    def signal_handler(signum: int, frame: object) -> None:
+        nonlocal stop_requested
+        if stop_requested:
+            sys.exit(1)
+        stop_requested = True
+        typer.echo("\n" + typer.style("Stopping servers...", fg=typer.colors.YELLOW))
+        for proc in processes:
+            proc.terminate()
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Start API server
+    if not ui_only:
+        typer.echo(
+            typer.style("🚀 ", bold=True)
+            + f"Starting API server on http://localhost:{api_port}"
+        )
+        api_proc = subprocess.Popen(
+            [
+                sys.executable, "-m", "uvicorn",
+                "provo.api.main:app",
+                "--host", "0.0.0.0",
+                "--port", str(api_port),
+                "--reload",
+            ],
+            cwd=str(api_dir),
+        )
+        processes.append(api_proc)
+
+        # Wait a bit for API to start
+        time.sleep(2)
+
+    # Start web UI
+    if not api_only:
+        # Check if npm/node is available
+        try:
+            subprocess.run(["npm", "--version"], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            typer.echo(
+                typer.style("✗ ", fg=typer.colors.RED, bold=True)
+                + "npm not found. Please install Node.js to use the web UI.",
+                err=True,
+            )
+            if processes:
+                processes[0].terminate()
+            sys.exit(1)
+
+        # Check if dependencies are installed
+        node_modules = web_dir / "node_modules"
+        if not node_modules.exists():
+            typer.echo(
+                typer.style("📦 ", bold=True)
+                + "Installing web UI dependencies..."
+            )
+            result = subprocess.run(
+                ["npm", "install"],
+                cwd=str(web_dir),
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                typer.echo(
+                    typer.style("✗ ", fg=typer.colors.RED, bold=True)
+                    + "Failed to install dependencies",
+                    err=True,
+                )
+                if processes:
+                    processes[0].terminate()
+                sys.exit(1)
+
+        typer.echo(
+            typer.style("🌐 ", bold=True)
+            + f"Starting web UI on http://localhost:{ui_port}"
+        )
+
+        # Set environment variable for API URL if using non-default port
+        env = os.environ.copy()
+        if api_port != 8000:
+            env["VITE_API_URL"] = f"http://localhost:{api_port}"
+
+        ui_proc = subprocess.Popen(
+            ["npm", "run", "dev", "--", "--port", str(ui_port)],
+            cwd=str(web_dir),
+            env=env,
+        )
+        processes.append(ui_proc)
+
+    typer.echo(
+        "\n" + typer.style("Ready! ", fg=typer.colors.GREEN, bold=True)
+        + "Press Ctrl+C to stop\n"
+    )
+
+    # Wait for processes
+    try:
+        while not stop_requested:
+            for proc in processes:
+                if proc.poll() is not None:
+                    typer.echo(
+                        typer.style("⚠️  ", fg=typer.colors.YELLOW)
+                        + "A server process exited unexpectedly"
+                    )
+                    stop_requested = True
+                    break
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for proc in processes:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+
 if __name__ == "__main__":
     app()
