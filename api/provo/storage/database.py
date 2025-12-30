@@ -474,6 +474,39 @@ class Database:
                 for row in rows
             ]
 
+    async def list_links(
+        self,
+        *,
+        link_type: LinkType | None = None,
+        limit: int = 1000,
+    ) -> list[FragmentLink]:
+        """List all fragment links with optional filtering."""
+        query = "SELECT * FROM fragment_links WHERE 1=1"
+        params: list = []
+
+        if link_type:
+            query += " AND link_type = ?"
+            params.append(link_type.value)
+
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        async with self.connect() as db:
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+            return [self._row_to_link(row) for row in rows]
+
+    def _row_to_link(self, row: aiosqlite.Row) -> FragmentLink:
+        """Convert a database row to a FragmentLink."""
+        return FragmentLink(
+            id=UUID(row["id"]),
+            source_id=UUID(row["source_id"]),
+            target_id=UUID(row["target_id"]),
+            link_type=LinkType(row["link_type"]),
+            strength=row["strength"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
     # ============== Helpers ==============
 
     def _row_to_fragment(self, row: aiosqlite.Row) -> ContextFragment:

@@ -3,6 +3,7 @@ import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
 import Search from './pages/Search';
 import Timeline from './pages/Timeline';
+import Graph from './pages/Graph';
 
 export const router = createBrowserRouter([
   {
@@ -20,6 +21,10 @@ export const router = createBrowserRouter([
       {
         path: 'timeline',
         element: <Timeline />,
+      },
+      {
+        path: 'graph',
+        element: <Graph />,
       },
     ],
   },
