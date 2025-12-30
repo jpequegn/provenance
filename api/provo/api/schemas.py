@@ -109,3 +109,50 @@ class RelatedFragmentsResponse(BaseModel):
 
     fragment_id: UUID
     related: list[RelatedFragmentItem] = Field(default_factory=list)
+
+
+class FragmentUpdateRequest(BaseModel):
+    """Request schema for updating a fragment's metadata."""
+
+    project: str | None = Field(None, description="Project name for organization")
+    topics: list[str] | None = Field(None, description="List of topic tags")
+    summary: str | None = Field(None, description="Summary of the fragment")
+
+
+class FragmentLinkRequest(BaseModel):
+    """Request schema for creating a link between fragments."""
+
+    target_id: str = Field(..., description="ID of the target fragment to link to")
+    link_type: str = Field(
+        default="relates_to",
+        description="Type of link: relates_to, references, follows, contradicts, invalidates",
+    )
+    strength: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="Link strength (0-1)",
+    )
+
+
+class FragmentLinkResponse(BaseModel):
+    """Response schema for a fragment link."""
+
+    id: UUID
+    source_id: UUID
+    target_id: UUID
+    link_type: str
+    strength: float
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AssumptionUpdateRequest(BaseModel):
+    """Request schema for updating an assumption."""
+
+    still_valid: bool | None = Field(None, description="Whether the assumption is still valid")
+    invalidated_by: str | None = Field(
+        None,
+        description="ID of the fragment that invalidates this assumption",
+    )

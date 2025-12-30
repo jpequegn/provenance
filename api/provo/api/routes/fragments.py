@@ -6,7 +6,10 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, status
 
 from provo.api.schemas import (
     FragmentCreateRequest,
+    FragmentLinkRequest,
+    FragmentLinkResponse,
     FragmentResponse,
+    FragmentUpdateRequest,
     RelatedFragmentItem,
     RelatedFragmentsResponse,
 )
@@ -416,6 +419,134 @@ async def list_fragments(
     )
 
     return [FragmentResponse.model_validate(f) for f in fragments]
+
+
+@router.patch(
+    "/{fragment_id}",
+    response_model=FragmentResponse,
+    responses={
+        200: {"description": "Fragment updated successfully"},
+        400: {"description": "Invalid request data"},
+        404: {"description": "Fragment not found"},
+    },
+)
+async def update_fragment(
+    fragment_id: str,
+    request: FragmentUpdateRequest,
+) -> FragmentResponse:
+    """Update a fragment's metadata (project, topics, summary).
+
+    Only the fields provided in the request will be updated.
+    """
+    from uuid import UUID
+
+    db = get_database()
+
+    try:
+        uuid_id = UUID(fragment_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid fragment ID format",
+        ) from e
+
+    # Get existing fragment
+    fragment = await db.get_fragment(uuid_id)
+    if fragment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Fragment not found",
+        )
+
+    # Update only provided fields
+    if request.project is not None:
+        fragment.project = request.project
+    if request.topics is not None:
+        fragment.topics = request.topics
+    if request.summary is not None:
+        fragment.summary = request.summary
+
+    # Save updates
+    updated_fragment = await db.update_fragment(fragment)
+
+    return FragmentResponse.model_validate(updated_fragment)
+
+
+@router.post(
+    "/{fragment_id}/links",
+    response_model=FragmentLinkResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        201: {"description": "Link created successfully"},
+        400: {"description": "Invalid request data"},
+        404: {"description": "Fragment not found"},
+    },
+)
+async def create_fragment_link(
+    fragment_id: str,
+    request: FragmentLinkRequest,
+) -> FragmentLinkResponse:
+    """Create a manual link between two fragments.
+
+    This allows users to explicitly link related fragments
+    that may not have been automatically connected.
+    """
+    from uuid import UUID
+
+    db = get_database()
+
+    try:
+        source_uuid = UUID(fragment_id)
+        target_uuid = UUID(request.target_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid fragment ID format",
+        ) from e
+
+    # Check both fragments exist
+    source_fragment = await db.get_fragment(source_uuid)
+    if source_fragment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Source fragment not found",
+        )
+
+    target_fragment = await db.get_fragment(target_uuid)
+    if target_fragment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Target fragment not found",
+        )
+
+    # Parse link type
+    try:
+        link_type_enum = LinkType(request.link_type.lower())
+    except ValueError as e:
+        valid_types = [t.value for t in LinkType]
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid link type: {request.link_type}. Valid types: {valid_types}",
+        ) from e
+
+    # Create the link
+    link = FragmentLink(
+        source_id=source_uuid,
+        target_id=target_uuid,
+        link_type=link_type_enum,
+        strength=request.strength,
+    )
+
+    created_link = await db.create_link(link)
+
+    return FragmentLinkResponse(
+        id=created_link.id,
+        source_id=created_link.source_id,
+        target_id=created_link.target_id,
+        link_type=created_link.link_type.value,
+        strength=created_link.strength,
+        created_at=created_link.created_at,
+    )
 
 
 @router.delete(

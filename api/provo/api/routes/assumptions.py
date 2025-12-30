@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
+from provo.api.schemas import AssumptionUpdateRequest
 from provo.storage import get_database
 
 router = APIRouter()
@@ -71,6 +72,97 @@ async def invalidate_assumption(
 
     # Invalidate the assumption
     success = await db.invalidate_assumption(uuid_id, invalidated_by_id)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Assumption not found",
+        )
+
+    # Fetch the updated assumption
+    all_assumptions = await db.list_assumptions(limit=1000)
+    updated_assumption = next(
+        (a for a in all_assumptions if a.id == uuid_id), None
+    )
+
+    if updated_assumption is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Assumption not found after update",
+        )
+
+    return AssumptionResponse(
+        id=str(updated_assumption.id),
+        fragment_id=str(updated_assumption.fragment_id),
+        statement=updated_assumption.statement,
+        explicit=updated_assumption.explicit,
+        still_valid=updated_assumption.still_valid,
+        invalidated_by=(
+            str(updated_assumption.invalidated_by)
+            if updated_assumption.invalidated_by
+            else None
+        ),
+        created_at=updated_assumption.created_at.isoformat(),
+    )
+
+
+@router.patch(
+    "/{assumption_id}",
+    response_model=AssumptionResponse,
+    responses={
+        200: {"description": "Assumption updated successfully"},
+        400: {"description": "Invalid ID format"},
+        404: {"description": "Assumption not found"},
+    },
+)
+async def update_assumption(
+    assumption_id: str,
+    request: AssumptionUpdateRequest,
+) -> AssumptionResponse:
+    """Update an assumption's validity status.
+
+    Can mark an assumption as valid (still_valid=true) or invalid (still_valid=false).
+    When marking invalid, optionally provide invalidated_by with the fragment ID
+    that contradicts this assumption.
+    """
+    db = get_database()
+
+    try:
+        uuid_id = UUID(assumption_id)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid assumption ID format",
+        ) from e
+
+    # Validate invalidated_by if provided
+    invalidated_by_id = None
+    if request.invalidated_by:
+        try:
+            invalidated_by_id = UUID(request.invalidated_by)
+            # Check that the invalidating fragment exists
+            invalidating_fragment = await db.get_fragment(invalidated_by_id)
+            if invalidating_fragment is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Invalidating fragment not found",
+                )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid invalidated_by fragment ID format",
+            ) from e
+
+    # Update the assumption
+    if request.still_valid is False and invalidated_by_id:
+        # Use the existing invalidate method
+        success = await db.invalidate_assumption(uuid_id, invalidated_by_id)
+    elif request.still_valid is not None:
+        # Update just the still_valid status
+        success = await db.update_assumption_validity(uuid_id, request.still_valid)
+    else:
+        # No updates to make
+        success = True
 
     if not success:
         raise HTTPException(

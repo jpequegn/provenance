@@ -49,6 +49,32 @@ export interface RelatedResponse {
   related: RelatedFragment[];
 }
 
+export interface FragmentLink {
+  id: string;
+  source_id: string;
+  target_id: string;
+  link_type: string;
+  strength: number;
+  created_at: string;
+}
+
+export interface FragmentUpdateData {
+  project?: string;
+  topics?: string[];
+  summary?: string;
+}
+
+export interface FragmentLinkData {
+  target_id: string;
+  link_type?: string;
+  strength?: number;
+}
+
+export interface AssumptionUpdateData {
+  still_valid?: boolean;
+  invalidated_by?: string;
+}
+
 // API base URL - uses proxy in development
 const API_BASE = '/api';
 
@@ -103,6 +129,20 @@ export const api = {
       const query = searchParams.toString();
       return fetchApi<RelatedResponse>(`/fragments/${id}/related${query ? `?${query}` : ''}`);
     },
+
+    update: (id: string, data: FragmentUpdateData) => {
+      return fetchApi<Fragment>(`/fragments/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      });
+    },
+
+    createLink: (id: string, data: FragmentLinkData) => {
+      return fetchApi<FragmentLink>(`/fragments/${id}/links`, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+    },
   },
 
   search: {
@@ -135,6 +175,13 @@ export const api = {
       if (params?.limit) searchParams.set('limit', String(params.limit));
       const query = searchParams.toString();
       return fetchApi<Assumption[]>(`/assumptions${query ? `?${query}` : ''}`);
+    },
+
+    update: (id: string, data: AssumptionUpdateData) => {
+      return fetchApi<Assumption>(`/assumptions/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      });
     },
   },
 };

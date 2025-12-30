@@ -362,6 +362,21 @@ class Database:
             await db.commit()
             return cursor.rowcount > 0
 
+    async def update_assumption_validity(
+        self, assumption_id: UUID, still_valid: bool
+    ) -> bool:
+        """Update an assumption's validity status."""
+        async with self.connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE assumptions SET still_valid = ?
+                WHERE id = ?
+                """,
+                (1 if still_valid else 0, str(assumption_id)),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
     async def list_assumptions(
         self,
         *,
